@@ -17,24 +17,10 @@
 
 package org.apache.kafka.connect.transforms;
 
-import org.apache.kafka.common.cache.Cache;
-import org.apache.kafka.common.cache.LRUCache;
-import org.apache.kafka.common.cache.SynchronizedCache;
-import org.apache.kafka.common.config.ConfigDef;
-import org.apache.kafka.common.config.ConfigException;
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.connect.connector.ConnectRecord;
-import org.apache.kafka.connect.data.Field;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.SchemaBuilder;
-import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Time;
-import org.apache.kafka.connect.data.Timestamp;
-import org.apache.kafka.connect.errors.ConnectException;
-import org.apache.kafka.connect.errors.DataException;
-import org.apache.kafka.connect.transforms.util.SchemaUtil;
-import org.apache.kafka.connect.transforms.util.SimpleConfig;
+import static org.apache.kafka.connect.transforms.util.Requirements.requireMap;
+import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
 
+import java.sql.Time;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
@@ -45,9 +31,20 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import static org.apache.kafka.connect.transforms.util.Requirements.requireMap;
-import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
+import org.apache.kafka.common.cache.SynchronizedCache;
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.connect.connector.ConnectRecord;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.transforms.Transformation;
+import org.apache.kafka.connect.transforms.util.SchemaUtil;
+import org.apache.kafka.connect.transforms.util.SimpleConfig;
+
+import sun.misc.LRUCache;
 
 public abstract class TimestampConverter<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -57,7 +54,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
                     + "<p/>Use the concrete transformation type designed for the record key (<code>" + TimestampConverter.Key.class.getName() + "</code>) "
                     + "or value (<code>" + TimestampConverter.Value.class.getName() + "</code>).";
 
-    public static final String FIELD_CONFIG = "field";
+    public static final String FIELD_CONFIG = "fields";
     private static final String FIELD_DEFAULT = "";
 
     public static final String TARGET_TYPE_CONFIG = "target.type";
@@ -67,7 +64,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
 
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
             .define(FIELD_CONFIG, ConfigDef.Type.STRING, FIELD_DEFAULT, ConfigDef.Importance.HIGH,
-                    "The field containing the timestamp, or empty if the entire value is a timestamp")
+                    "A regex to find fields containing timestamps, or empty if the entire value is a timestamp")
             .define(TARGET_TYPE_CONFIG, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH,
                     "The desired timestamp representation: string, unix, Date, Time, or Timestamp")
             .define(FORMAT_CONFIG, ConfigDef.Type.STRING, FORMAT_DEFAULT, ConfigDef.Importance.MEDIUM,
@@ -81,7 +78,8 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     private static final String TYPE_DATE = "Date";
     private static final String TYPE_TIME = "Time";
     private static final String TYPE_TIMESTAMP = "Timestamp";
-    private static final Set<String> VALID_TYPES = new HashSet<>(Arrays.asList(TYPE_STRING, TYPE_UNIX, TYPE_DATE, TYPE_TIME, TYPE_TIMESTAMP));
+    private static final String TYPE_DAYS = "DaysSinceEpoch";
+    private static final Set<String> VALID_TYPES = new HashSet<>(Arrays.asList(TYPE_STRING, TYPE_UNIX, TYPE_DATE, TYPE_TIME, TYPE_TIMESTAMP, TYPE_DAYS));
 
     private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
@@ -94,7 +92,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
         /**
          * Get the schema for this format.
          */
-        Schema typeSchema();
+        Schema typeSchema(Boolean isOptional, Object defaultValue);
 
         /**
          * Convert from the universal java.util.Date format to the type-specific format
@@ -118,8 +116,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             }
 
             @Override
-            public Schema typeSchema() {
-                return Schema.STRING_SCHEMA;
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = SchemaBuilder.string();
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
             }
 
             @Override
@@ -139,8 +144,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             }
 
             @Override
-            public Schema typeSchema() {
-                return Schema.INT64_SCHEMA;
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = SchemaBuilder.int64().name(Timestamp.LOGICAL_NAME);
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
             }
 
             @Override
@@ -159,8 +171,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             }
 
             @Override
-            public Schema typeSchema() {
-                return org.apache.kafka.connect.data.Date.SCHEMA;
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = org.apache.kafka.connect.data.Date.builder();
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
             }
 
             @Override
@@ -185,8 +204,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             }
 
             @Override
-            public Schema typeSchema() {
-                return Time.SCHEMA;
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = Time.builder();
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
             }
 
             @Override
@@ -212,8 +238,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             }
 
             @Override
-            public Schema typeSchema() {
-                return Timestamp.SCHEMA;
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = Timestamp.builder();
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
             }
 
             @Override
@@ -221,17 +254,44 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
                 return orig;
             }
         });
+
+        TRANSLATORS.put(TYPE_DAYS, new TimestampTranslator() {
+            @Override
+            public Date toRaw(Config config, Object orig) {
+                if (!(orig instanceof Integer))
+                    throw new DataException("Expected Number of days since Epoch to be an Integer, but found " + orig.getClass());
+                return org.apache.kafka.connect.data.Date.toLogical(org.apache.kafka.connect.data.Date.SCHEMA, (int) orig);
+            }
+
+            @Override
+            public Schema typeSchema(Boolean isOptional, Object defaultValue) {
+                SchemaBuilder schema = SchemaBuilder.int32().name(org.apache.kafka.connect.data.Date.LOGICAL_NAME);
+                if (isOptional) {
+                    schema.optional();
+                }
+                if (defaultValue != null) {
+                    schema.defaultValue(defaultValue);
+                }
+                return schema.build();
+            }
+
+            @Override
+            public Object toType(Config config, Date orig) {
+                return org.apache.kafka.connect.data.Date.fromLogical(org.apache.kafka.connect.data.Date.SCHEMA, orig);
+            }
+        });
+
     }
 
     // This is a bit unusual, but allows the transformation config to be passed to static anonymous classes to customize
     // their behavior
     private static class Config {
-        Config(String field, String type, SimpleDateFormat format) {
-            this.field = field;
+        Config(String fieldsMatching, String type, SimpleDateFormat format) {
+            this.fieldsMatching = fieldsMatching;
             this.type = type;
             this.format = format;
         }
-        String field;
+        String fieldsMatching;
         String type;
         SimpleDateFormat format;
     }
@@ -242,7 +302,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     @Override
     public void configure(Map<String, ?> configs) {
         final SimpleConfig simpleConfig = new SimpleConfig(CONFIG_DEF, configs);
-        final String field = simpleConfig.getString(FIELD_CONFIG);
+        final String fieldsMatching = simpleConfig.getString(FIELD_CONFIG);
         final String type = simpleConfig.getString(TARGET_TYPE_CONFIG);
         String formatPattern = simpleConfig.getString(FORMAT_CONFIG);
         schemaUpdateCache = new SynchronizedCache<>(new LRUCache<Schema, Schema>(16));
@@ -264,7 +324,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
                         + formatPattern, e);
             }
         }
-        config = new Config(field, type, format);
+        config = new Config(fieldsMatching, type, format);
     }
 
     @Override
@@ -325,29 +385,38 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
 
     protected abstract R newRecord(R record, Schema updatedSchema, Object updatedValue);
 
+    private Boolean fieldIsMathing(String topic, String field) {
+        Pattern pattern = Pattern.compile(config.fieldsMatching);
+        Matcher matcher = pattern.matcher(topic + "." + field);
+        return matcher.find();
+    }
+
     private R applyWithSchema(R record) {
         final Schema schema = operatingSchema(record);
-        if (config.field.isEmpty()) {
+        if (config.fieldsMatching.isEmpty()) {
             Object value = operatingValue(record);
             // New schema is determined by the requested target timestamp type
-            Schema updatedSchema = TRANSLATORS.get(config.type).typeSchema();
+            Schema updatedSchema = TRANSLATORS.get(config.type).typeSchema(schema.isOptional(), schema.defaultValue());
             return newRecord(record, updatedSchema, convertTimestamp(value, timestampTypeFromSchema(schema)));
         } else {
+            final String topic = record.topic();
             final Struct value = requireStruct(operatingValue(record), PURPOSE);
             Schema updatedSchema = schemaUpdateCache.get(value.schema());
             if (updatedSchema == null) {
                 SchemaBuilder builder = SchemaUtil.copySchemaBasics(schema, SchemaBuilder.struct());
                 for (Field field : schema.fields()) {
-                    if (field.name().equals(config.field)) {
-                        builder.field(field.name(), TRANSLATORS.get(config.type).typeSchema());
+                    final Schema fieldSchema = field.schema();
+                    if (fieldIsMathing(topic, field.name())) {
+                        Schema updatedFieldSchema = TRANSLATORS.get(config.type).typeSchema(fieldSchema.isOptional(), fieldSchema.defaultValue());
+                        builder.field(field.name(), updatedFieldSchema);
                     } else {
-                        builder.field(field.name(), field.schema());
+                        builder.field(field.name(), fieldSchema);
                     }
                 }
                 if (schema.isOptional())
                     builder.optional();
                 if (schema.defaultValue() != null) {
-                    Struct updatedDefaultValue = applyValueWithSchema((Struct) schema.defaultValue(), builder);
+                    Struct updatedDefaultValue = applyValueWithSchema((Struct) schema.defaultValue(), builder, topic);
                     builder.defaultValue(updatedDefaultValue);
                 }
 
@@ -355,16 +424,16 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
                 schemaUpdateCache.put(schema, updatedSchema);
             }
 
-            Struct updatedValue = applyValueWithSchema(value, updatedSchema);
+            Struct updatedValue = applyValueWithSchema(value, updatedSchema, topic);
             return newRecord(record, updatedSchema, updatedValue);
         }
     }
 
-    private Struct applyValueWithSchema(Struct value, Schema updatedSchema) {
+    private Struct applyValueWithSchema(Struct value, Schema updatedSchema, String topic) {
         Struct updatedValue = new Struct(updatedSchema);
         for (Field field : value.schema().fields()) {
             final Object updatedFieldValue;
-            if (field.name().equals(config.field)) {
+            if (fieldIsMathing(topic, field.name())) {
                 updatedFieldValue = convertTimestamp(value.get(field), timestampTypeFromSchema(field.schema()));
             } else {
                 updatedFieldValue = value.get(field);
@@ -375,13 +444,14 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     }
 
     private R applySchemaless(R record) {
-        if (config.field.isEmpty()) {
+        if (config.fieldsMatching.isEmpty()) {
             Object value = operatingValue(record);
             return newRecord(record, null, convertTimestamp(value));
         } else {
             final Map<String, Object> value = requireMap(operatingValue(record), PURPOSE);
             final HashMap<String, Object> updatedValue = new HashMap<>(value);
-            updatedValue.put(config.field, convertTimestamp(value.get(config.field)));
+            // FIXME: put in `config.fieldsMatching` might not produce what we expect as the put key might be a regex string pattern...?
+            updatedValue.put(config.fieldsMatching, convertTimestamp(value.get(config.fieldsMatching)));
             return newRecord(record, null, updatedValue);
         }
     }
@@ -402,6 +472,9 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
         } else if (schema.type().equals(Schema.Type.INT64)) {
             // If not otherwise specified, long == unix time
             return TYPE_UNIX;
+        } else if (schema.type().equals(Schema.Type.INT32)) {
+            // If not otherwise specified, integer == days since Epoch
+            return TYPE_DAYS;
         }
         throw new ConnectException("Schema " + schema + " does not correspond to a known timestamp type format");
     }
@@ -416,6 +489,8 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             return TYPE_TIMESTAMP;
         } else if (timestamp instanceof Long) {
             return TYPE_UNIX;
+        } else if (timestamp instanceof Integer) {
+            return TYPE_DAYS;
         } else if (timestamp instanceof String) {
             return TYPE_STRING;
         }
@@ -429,6 +504,10 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
      * @return the converted timestamp
      */
     private Object convertTimestamp(Object timestamp, String timestampFormat) {
+        if (timestamp == null) {
+            return timestamp;
+        }
+
         if (timestampFormat == null) {
             timestampFormat = inferTimestampType(timestamp);
         }
